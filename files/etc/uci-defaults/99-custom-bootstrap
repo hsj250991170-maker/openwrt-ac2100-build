@@ -1,0 +1,37 @@
+#!/bin/sh
+# ============================================================
+# 99-custom-bootstrap —— 首次启动时执行的 uci-defaults 脚本
+# 一次性运行，运行后自删
+# ============================================================
+set -e
+
+# 1. 关闭 IPv6 DHCP（避免透明代理时 IPv6 流量绕过 passwall/openclash）
+uci -q set dhcp.lan.ra='disabled'
+uci -q set dhcp.lan.dhcpv6='disabled'
+uci -q commit dhcp
+
+# 2. 设置时区
+uci -q set system.@system[0].timezone='CST-8'
+uci -q set system.@system[0].zonename='Asia/Shanghai'
+uci -q commit system
+
+# 3. 主机名
+uci -q set system.@system[0].hostname='AC2100'
+uci -q commit system
+
+# 4. 设置默认主题 argon
+uci -q set luci.main.mediaurlbase='/luci-static/argon'
+uci -q commit luci
+
+# 5. OpenClash 预配置（启动模式 fake-ip，方便后面用 Ninja 订阅）
+uci -q set openclash.config.en_mode="fake-ip"
+uci -q set openclash.config.enable_redirect_dns="1"
+uci -q commit openclash 2>/dev/null || true
+
+# 6. 创建 /etc/openclash/core 目录
+mkdir -p /etc/openclash/core
+
+# 7. 提示信息（在系统日志里能看到）
+logger -t bootstrap "Custom OpenWrt bootstrap applied: LAN 192.168.31.1, AC2100, argon theme, OpenClash ready"
+
+exit 0

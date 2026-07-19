@@ -1,0 +1,158 @@
+#
+# ImmortalWrt 云编译 workflow —— 小米/红米 AC2100 (MT7621)
+# 包含 passwall2 + OpenClash (mihomo 内核)，轻量配置
+#
+name: Build OpenWrt for AC2100
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH 进 Actions 调试 (true/false)'
+        required: false
+        default: 'false'
+  push:
+    branches:
+      - main
+      - master
+  schedule:
+    # 每月 1 号和 15 号 UTC 18:00 (北京时间次日 02:00) 自动编译一次
+    - cron: '0 18 1,15 * *'
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt.git
+  REPO_BRANCH: openwrt-24.10
+  CONFIG_FILE: config/ac2100.config
+  DIY_SH_PART1: scripts/diy-part1.sh
+  DIY_SH_PART2: scripts/diy-part2.sh
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    name: Build ImmortalWrt for AC2100
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 检查空间 & 释放磁盘
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
+
+      - name: 设置时区
+        run: sudo timedatectl set-timezone "$TZ"
+
+      - name: 安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -y
+          sudo apt-get full-upgrade -y
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler fastjar flex gawk gcc-multilib g++-multilib \
+            gettext genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev \
+            libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev \
+            libpython3-dev libreadline-dev libssl-dev libtool lrzsz msmtp ninja-build p7zip p7zip-full \
+            patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs unzip vim wget xmlto xxd zlib1g-dev zstd
+
+      - name: 克隆 ImmortalWrt 源码
+        run: |
+          git clone --depth=1 --branch $REPO_BRANCH $REPO_URL openwrt
+          cd openwrt
+          echo "===== 最近提交 ====="
+          git log -1 --format='%H %s (%ci)'
+
+      - name: 更新 feeds (DIY part1 - 添加第三方 feed)
+        run: |
+          cd openwrt
+          # 执行 DIY part1：添加 OpenClash 等第三方 feed
+          chmod +x $GITHUB_WORKSPACE/$DIY_SH_PART1
+          bash $GITHUB_WORKSPACE/$DIY_SH_PART1
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 加载自定义配置 (DIY part2 - 修改默认设置)
+        run: |
+          cd openwrt
+          chmod +x $GITHUB_WORKSPACE/$DIY_SH_PART2
+          bash $GITHUB_WORKSPACE/$DIY_SH_PART2
+
+      - name: 生成 .config
+        run: |
+          cd openwrt
+          # 用项目里的 config 覆盖，再 make defconfig 自动补全依赖
+          cp -f $GITHUB_WORKSPACE/$CONFIG_FILE .config
+          make defconfig
+          echo "===== 最终 .config 摘要 ====="
+          grep -E '^(CONFIG_TARGET|CONFIG_PACKAGE_luci-app|CONFIG_PACKAGE_(passwall|openclash|mihomo|xray|sing-box|v2ray|trojan|shadowsocks))' .config | head -60
+
+      - name: SSH 调试 (可选)
+        uses: mxschmitt/action-tmate@v3
+        if: ${{ github.event.inputs.ssh == 'true' }}
+        timeout-minutes: 30
+
+      - name: 下载 dl 库
+        run: |
+          cd openwrt
+          make download -j$(nproc)
+          # 检查是否有下载失败的小文件
+          find dl -size -1024c -exec ls -l {} \; 2>/dev/null || true
+
+      - name: 编译固件
+        id: compile
+        run: |
+          cd openwrt
+          echo "===== 开始编译，多线程 ====="
+          make -j$(nproc) V=s 2>&1 | tee build.log
+          echo "===== 编译完成 ====="
+          ls -lh bin/targets/ramips/mt7621/ 2>/dev/null || true
+
+      - name: 整理固件产物
+        if: env.UPLOAD_FIRMWARE == 'true'
+        run: |
+          cd openwrt
+          mkdir -p /tmp/firmware
+          # 复制 sysupgrade / factory 固件
+          find bin/targets/ramips/mt7621/ -type f \( -name '*sysupgrade.bin' -o -name '*factory.bin' -o -name '*kernel1.bin' -o -name '*rootfs0.bin' -o -name 'sha256sums' -o -name '*.manifest' \) -exec cp -f {} /tmp/firmware/ \;
+          # 复制关键 ipk (passwall/openclash 等)，方便日后单独安装
+          find bin/packages/mipsel_24kc/base/ -type f -name '*.ipk' \( -name '*passwall*' -o -name '*openclash*' -o -name '*mihomo*' -o -name '*xray*' -o -name '*sing-box*' -o -name '*v2ray*' -o -name '*trojan*' -o -name '*shadowsocks*' \) -exec cp -f {} /tmp/firmware/ \; 2>/dev/null || true
+          find bin/packages/mipsel_24kc/luci/ -type f -name '*.ipk' \( -name '*passwall*' -o -name '*openclash*' \) -exec cp -f {} /tmp/firmware/ \; 2>/dev/null || true
+          cd /tmp/firmware
+          sha256sum * > sha256sums.txt
+          ls -lh /tmp/firmware/
+
+      - name: 上传固件 artifact
+        if: env.UPLOAD_FIRMWARE == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-ac2100-${{ github.run_number }}
+          path: /tmp/firmware/*
+          retention-days: 14
+          compression-level: 0
+
+      - name: 删除旧 workflow 运行记录
+        if: github.event_name == 'schedule'
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          retain_days: 7
+          keep_minimum_runs: 5
+
+      - name: 编译失败时上传日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: openwrt/build.log
+          retention-days: 7

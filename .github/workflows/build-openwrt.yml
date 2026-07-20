@@ -118,30 +118,41 @@ jobs:
           cd openwrt
           echo "===== 开始编译，多线程 ====="
           make -j$(nproc) V=s 2>&1 | tee build.log
-          echo "===== 编译完成 ====="
-          ls -lh bin/targets/ramips/mt7621/ 2>/dev/null || true
+          echo "===== make world 完成，开始生成固件镜像 ====="
+          # 多profile并行编译时 make world 可能跳过 target/linux/install
+          # 显式执行确保固件镜像(.bin)生成
+          make target/linux/install -j$(nproc) V=s 2>&1 | tee -a build.log
+          echo "===== 固件镜像生成完成 ====="
+          echo "--- bin/targets/ramips/mt7621/ 内容 ---"
+          ls -lh bin/targets/ramips/mt7621/ 2>/dev/null || echo "目录不存在"
+          echo "--- 所有 .bin 文件 ---"
+          find bin/targets/ -name '*.bin' -ls 2>/dev/null || true
 
       - name: 整理固件产物
         if: env.UPLOAD_FIRMWARE == 'true'
         run: |
           cd openwrt
           mkdir -p /tmp/firmware
-          # 复制 sysupgrade / factory 固件（用 || true 防止 find 无匹配时报错）
+          # 复制 sysupgrade / factory 固件
           find bin/targets/ramips/mt7621/ -type f \( -name '*sysupgrade.bin' -o -name '*factory.bin' -o -name '*kernel1.bin' -o -name '*rootfs0.bin' -o -name 'sha256sums' -o -name '*.manifest' \) -exec cp -f {} /tmp/firmware/ \; 2>/dev/null || true
-          # 复制关键 ipk (passwall/openclash 等)，方便日后单独安装
+          # 复制关键 ipk (passwall/openclash 等)
           find bin/packages/mipsel_24kc/base/ -type f -name '*.ipk' \( -name '*passwall*' -o -name '*openclash*' -o -name '*mihomo*' -o -name '*xray*' -o -name '*sing-box*' -o -name '*v2ray*' -o -name '*trojan*' -o -name '*shadowsocks*' \) -exec cp -f {} /tmp/firmware/ \; 2>/dev/null || true
           find bin/packages/mipsel_24kc/luci/ -type f -name '*.ipk' \( -name '*passwall*' -o -name '*openclash*' \) -exec cp -f {} /tmp/firmware/ \; 2>/dev/null || true
-          # 也查找子目录（多profile编译可能输出在子目录）
-          find bin/targets/ramips/mt7621/ -type f \( -name '*.bin' -o -name 'sha256sums' -o -name '*.manifest' \) -exec cp -f {} /tmp/firmware/ \; 2>/dev/null || true
+          # fallback: 查找所有 .bin 文件
+          find bin/targets/ramips/mt7621/ -type f -name '*.bin' -exec cp -f {} /tmp/firmware/ \; 2>/dev/null || true
           cd /tmp/firmware
-          # 只在有文件时才生成校验和，避免空目录报错
-          if [ "$(ls -A /tmp/firmware/ 2>/dev/null)" ]; then
+          # 统计 .bin 文件数量
+          BIN_COUNT=$(find /tmp/firmware/ -name '*.bin' 2>/dev/null | wc -l)
+          echo "找到 $BIN_COUNT 个 .bin 固件文件"
+          if [ "$BIN_COUNT" -gt 0 ]; then
             sha256sum * > sha256sums.txt
             ls -lh /tmp/firmware/
           else
-            echo "⚠️ /tmp/firmware 为空！编译可能未生成固件文件"
-            ls -lh bin/targets/ramips/mt7621/ 2>/dev/null || echo "bin/targets/ramips/mt7621/ 不存在"
-            find bin/ -name '*.bin' 2>/dev/null | head -20 || true
+            echo "⚠️ 没有找到 .bin 固件文件！诊断信息："
+            echo "--- bin/targets/ramips/mt7621/ 内容 ---"
+            ls -lhR bin/targets/ramips/mt7621/ 2>/dev/null || echo "目录不存在"
+            echo "--- bin/ 下所有 .bin ---"
+            find bin/ -name '*.bin' -ls 2>/dev/null | head -20
             exit 1
           fi
 
@@ -161,10 +172,11 @@ jobs:
           retain_days: 7
           keep_minimum_runs: 5
 
-      - name: 编译失败时上传日志
-        if: failure()
+      - name: 总是上传编译日志
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ github.run_number }}
           path: openwrt/build.log
           retention-days: 7
+          if-no-files-found: ignore

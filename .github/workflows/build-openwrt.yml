@@ -105,6 +105,7 @@ jobs:
 
       - name: 下载 dl 库
         run: |
+          set -o pipefail
           cd openwrt
           make download -j$(nproc)
           # 检查是否有下载失败的小文件
@@ -113,6 +114,7 @@ jobs:
       - name: 编译固件
         id: compile
         run: |
+          set -o pipefail
           cd openwrt
           echo "===== 开始编译，多线程 ====="
           make -j$(nproc) V=s 2>&1 | tee build.log
@@ -124,14 +126,24 @@ jobs:
         run: |
           cd openwrt
           mkdir -p /tmp/firmware
-          # 复制 sysupgrade / factory 固件
-          find bin/targets/ramips/mt7621/ -type f \( -name '*sysupgrade.bin' -o -name '*factory.bin' -o -name '*kernel1.bin' -o -name '*rootfs0.bin' -o -name 'sha256sums' -o -name '*.manifest' \) -exec cp -f {} /tmp/firmware/ \;
+          # 复制 sysupgrade / factory 固件（用 || true 防止 find 无匹配时报错）
+          find bin/targets/ramips/mt7621/ -type f \( -name '*sysupgrade.bin' -o -name '*factory.bin' -o -name '*kernel1.bin' -o -name '*rootfs0.bin' -o -name 'sha256sums' -o -name '*.manifest' \) -exec cp -f {} /tmp/firmware/ \; 2>/dev/null || true
           # 复制关键 ipk (passwall/openclash 等)，方便日后单独安装
           find bin/packages/mipsel_24kc/base/ -type f -name '*.ipk' \( -name '*passwall*' -o -name '*openclash*' -o -name '*mihomo*' -o -name '*xray*' -o -name '*sing-box*' -o -name '*v2ray*' -o -name '*trojan*' -o -name '*shadowsocks*' \) -exec cp -f {} /tmp/firmware/ \; 2>/dev/null || true
           find bin/packages/mipsel_24kc/luci/ -type f -name '*.ipk' \( -name '*passwall*' -o -name '*openclash*' \) -exec cp -f {} /tmp/firmware/ \; 2>/dev/null || true
+          # 也查找子目录（多profile编译可能输出在子目录）
+          find bin/targets/ramips/mt7621/ -type f \( -name '*.bin' -o -name 'sha256sums' -o -name '*.manifest' \) -exec cp -f {} /tmp/firmware/ \; 2>/dev/null || true
           cd /tmp/firmware
-          sha256sum * > sha256sums.txt
-          ls -lh /tmp/firmware/
+          # 只在有文件时才生成校验和，避免空目录报错
+          if [ "$(ls -A /tmp/firmware/ 2>/dev/null)" ]; then
+            sha256sum * > sha256sums.txt
+            ls -lh /tmp/firmware/
+          else
+            echo "⚠️ /tmp/firmware 为空！编译可能未生成固件文件"
+            ls -lh bin/targets/ramips/mt7621/ 2>/dev/null || echo "bin/targets/ramips/mt7621/ 不存在"
+            find bin/ -name '*.bin' 2>/dev/null | head -20 || true
+            exit 1
+          fi
 
       - name: 上传固件 artifact
         if: env.UPLOAD_FIRMWARE == 'true'
